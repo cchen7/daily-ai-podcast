@@ -217,86 +217,81 @@ def fetch_existing_feed(feed_url: str) -> ET.Element | None:
     return None
 
 
-def channel_text(channel: ET.Element, tag: str, value: str) -> None:
-    node = channel.find(tag)
-    if node is None:
-        node = ET.SubElement(channel, tag)
-    node.text = value
+_DATE_IN_URL = re.compile(r"/episodes/(\d{4}-\d{2}-\d{2})-")
 
 
 def build_or_update_feed(config: PodcastConfig, episode: Episode, feed_url: str) -> ET.ElementTree:
-    root = fetch_existing_feed(feed_url)
-    if root is None or root.tag != "rss":
-        root = ET.Element("rss", {"version": "2.0"})
-        channel = ET.SubElement(root, "channel")
-    else:
-        channel = root.find("channel")
-        if channel is None:
-            channel = ET.SubElement(root, "channel")
+    existing_root = fetch_existing_feed(feed_url)
+    preserved_items: list[ET.Element] = []
+    if existing_root is not None and existing_root.tag == "rss":
+        existing_channel = existing_root.find("channel")
+        if existing_channel is not None:
+            for old in existing_channel.findall("item"):
+                guid_node = old.find("guid")
+                guid_text = guid_node.text if guid_node is not None else None
+                if guid_text == episode.mp3_url:
+                    continue
+                match = _DATE_IN_URL.search(guid_text or "")
+                if match and match.group(1) == episode.date:
+                    continue
+                preserved_items.append(old)
 
-    channel_text(channel, "title", config.title)
-    channel_text(channel, "link", config.public_base_url)
-    channel_text(channel, "description", config.description)
-    channel_text(channel, "language", config.language)
-    channel_text(channel, "copyright", f"Copyright {datetime.now().year} {config.author}")
-    channel_text(channel, f"{{{ITUNES_NS}}}author", config.author)
-    channel_text(channel, f"{{{ITUNES_NS}}}summary", config.description)
-    channel_text(channel, f"{{{ITUNES_NS}}}explicit", config.explicit)
+    root = ET.Element("rss", {"version": "2.0"})
+    channel = ET.SubElement(root, "channel")
 
-    owner = channel.find(f"{{{ITUNES_NS}}}owner")
-    if owner is None:
-        owner = ET.SubElement(channel, f"{{{ITUNES_NS}}}owner")
-    channel_text(owner, f"{{{ITUNES_NS}}}name", config.owner_name)
-    channel_text(owner, f"{{{ITUNES_NS}}}email", config.owner_email)
+    ET.SubElement(channel, "title").text = config.title
+    ET.SubElement(channel, "link").text = config.public_base_url
+    ET.SubElement(channel, "description").text = config.description
+    ET.SubElement(channel, "language").text = config.language
+    ET.SubElement(channel, "copyright").text = f"Copyright {datetime.now().year} {config.author}"
+    ET.SubElement(channel, f"{{{ITUNES_NS}}}author").text = config.author
+    ET.SubElement(channel, f"{{{ITUNES_NS}}}summary").text = config.description
+    ET.SubElement(channel, f"{{{ITUNES_NS}}}explicit").text = config.explicit
+    ET.SubElement(channel, f"{{{ITUNES_NS}}}type").text = "episodic"
 
-    category = channel.find(f"{{{ITUNES_NS}}}category")
-    if category is None:
-        category = ET.SubElement(channel, f"{{{ITUNES_NS}}}category")
-    category.set("text", config.category)
+    owner = ET.SubElement(channel, f"{{{ITUNES_NS}}}owner")
+    ET.SubElement(owner, f"{{{ITUNES_NS}}}name").text = config.owner_name
+    ET.SubElement(owner, f"{{{ITUNES_NS}}}email").text = config.owner_email
+
+    ET.SubElement(channel, f"{{{ITUNES_NS}}}category", {"text": config.category})
 
     if config.image_url:
-        image = channel.find("image")
-        if image is None:
-            image = ET.SubElement(channel, "image")
-        channel_text(image, "url", config.image_url)
-        channel_text(image, "title", config.title)
-        channel_text(image, "link", config.public_base_url)
+        image = ET.SubElement(channel, "image")
+        ET.SubElement(image, "url").text = config.image_url
+        ET.SubElement(image, "title").text = config.title
+        ET.SubElement(image, "link").text = config.public_base_url
+        ET.SubElement(channel, f"{{{ITUNES_NS}}}image", {"href": config.image_url})
 
-        itunes_image = channel.find(f"{{{ITUNES_NS}}}image")
-        if itunes_image is None:
-            itunes_image = ET.SubElement(channel, f"{{{ITUNES_NS}}}image")
-        itunes_image.set("href", config.image_url)
+    ET.SubElement(
+        channel,
+        f"{{{ATOM_NS}}}link",
+        {"href": feed_url, "rel": "self", "type": "application/rss+xml"},
+    )
 
-    atom_link = channel.find(f"{{{ATOM_NS}}}link")
-    if atom_link is None:
-        atom_link = ET.SubElement(channel, f"{{{ATOM_NS}}}link")
-    atom_link.set("href", feed_url)
-    atom_link.set("rel", "self")
-    atom_link.set("type", "application/rss+xml")
-
-    guid = episode.mp3_url
-    for item in list(channel.findall("item")):
-        guid_node = item.find("guid")
-        if guid_node is not None and guid_node.text == guid:
-            channel.remove(item)
+    ET.SubElement(channel, "lastBuildDate").text = email.utils.format_datetime(
+        datetime.now(timezone.utc)
+    )
 
     item = ET.Element("item")
-    channel_text(item, "title", episode.title)
-    channel_text(item, "description", episode.description)
-    channel_text(item, "pubDate", email.utils.format_datetime(episode.pub_date))
-    channel_text(item, "guid", guid)
-    item.find("guid").set("isPermaLink", "false")
-    channel_text(item, f"{{{ITUNES_NS}}}author", config.author)
-    channel_text(item, f"{{{ITUNES_NS}}}summary", episode.description)
-    channel_text(item, f"{{{ITUNES_NS}}}duration", episode.duration)
-    channel_text(item, f"{{{ITUNES_NS}}}explicit", config.explicit)
-    enclosure = ET.SubElement(item, "enclosure")
-    enclosure.set("url", episode.mp3_url)
-    enclosure.set("length", str(episode.file_size))
-    enclosure.set("type", "audio/mpeg")
-    channel.insert(0, item)
+    ET.SubElement(item, "title").text = episode.title
+    ET.SubElement(item, "description").text = episode.description
+    ET.SubElement(item, "pubDate").text = email.utils.format_datetime(episode.pub_date)
+    guid = ET.SubElement(item, "guid", {"isPermaLink": "false"})
+    guid.text = episode.mp3_url
+    ET.SubElement(item, f"{{{ITUNES_NS}}}author").text = config.author
+    ET.SubElement(item, f"{{{ITUNES_NS}}}summary").text = episode.description
+    ET.SubElement(item, f"{{{ITUNES_NS}}}duration").text = episode.duration
+    ET.SubElement(item, f"{{{ITUNES_NS}}}explicit").text = config.explicit
+    ET.SubElement(
+        item,
+        "enclosure",
+        {"url": episode.mp3_url, "length": str(episode.file_size), "type": "audio/mpeg"},
+    )
 
-    channel_text(channel, "lastBuildDate", email.utils.format_datetime(datetime.now(timezone.utc)))
+    channel.append(item)
+    for old in preserved_items:
+        channel.append(old)
+
     return ET.ElementTree(root)
 
 
