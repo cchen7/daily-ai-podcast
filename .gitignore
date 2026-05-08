@@ -1,0 +1,25 @@
+# Secrets / local config
+.env
+.env.local
+.env.*.local
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local artifacts (publish.py output)
+output/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code session-local
+tasks/
