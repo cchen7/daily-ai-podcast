@@ -1,0 +1,125 @@
+name: publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'newsletters/**.md'
+      - 'src/**'
+      - 'requirements.txt'
+      - '.github/workflows/publish.yml'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Episode date (YYYY-MM-DD). Required for manual runs.'
+        required: true
+        type: string
+      title:
+        description: 'Episode title'
+        required: false
+        default: 'Daily AI Brief'
+        type: string
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve newsletter to publish
+        id: nl
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DATE: ${{ github.event.inputs.date }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            DATE="${INPUT_DATE}"
+            # Validate the manual input strictly (defense in depth — only repo
+            # writers can dispatch, but keep shell-safe regardless).
+            if ! echo "${DATE}" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+              echo "::error::Invalid date format: ${DATE}"; exit 1
+            fi
+          else
+            # Pick the newest newsletter touched in the pushed commit.
+            # Fall back to newest file under newsletters/ if no .md was in the
+            # diff (e.g. push only changed code).
+            DATE=$(git log -1 --name-only --diff-filter=AM --pretty=format: \
+              | grep -E '^newsletters/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$' \
+              | head -1 \
+              | sed -E 's|newsletters/(.*)\.md|\1|' || true)
+            if [ -z "${DATE}" ]; then
+              DATE=$(ls newsletters/ 2>/dev/null \
+                | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$' \
+                | sort -r | head -1 | sed -E 's|(.*)\.md|\1|')
+            fi
+          fi
+          if [ -z "${DATE}" ]; then
+            echo "::error::Could not determine episode date"; exit 1
+          fi
+          NL="newsletters/${DATE}.md"
+          if [ ! -f "${NL}" ]; then
+            echo "::error::Newsletter not found: ${NL}"; exit 1
+          fi
+          echo "date=${DATE}"     >> "$GITHUB_OUTPUT"
+          echo "newsletter=${NL}" >> "$GITHUB_OUTPUT"
+          echo "Resolved: date=${DATE} newsletter=${NL}"
+
+      - name: Publish episode
+        env:
+          # Secrets
+          AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          # Variables (non-secret)
+          AZURE_SPEECH_REGION: ${{ vars.AZURE_SPEECH_REGION }}
+          AZURE_SPEECH_VOICE: ${{ vars.AZURE_SPEECH_VOICE }}
+          AZURE_SPEECH_RATE: ${{ vars.AZURE_SPEECH_RATE }}
+          AZURE_SPEECH_PITCH: ${{ vars.AZURE_SPEECH_PITCH }}
+          AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
+          PODCAST_PUBLIC_BASE_URL: ${{ vars.PODCAST_PUBLIC_BASE_URL }}
+          PODCAST_TITLE: ${{ vars.PODCAST_TITLE }}
+          PODCAST_DESCRIPTION: ${{ vars.PODCAST_DESCRIPTION }}
+          PODCAST_AUTHOR: ${{ vars.PODCAST_AUTHOR }}
+          PODCAST_OWNER_NAME: ${{ vars.PODCAST_OWNER_NAME }}
+          PODCAST_OWNER_EMAIL: ${{ vars.PODCAST_OWNER_EMAIL }}
+          PODCAST_LANGUAGE: ${{ vars.PODCAST_LANGUAGE }}
+          PODCAST_CATEGORY: ${{ vars.PODCAST_CATEGORY }}
+          PODCAST_EXPLICIT: ${{ vars.PODCAST_EXPLICIT }}
+          PODCAST_IMAGE_URL: ${{ vars.PODCAST_IMAGE_URL }}
+          # Resolved + step inputs (avoid direct ${{ }} interpolation in run:)
+          EPISODE_DATE: ${{ steps.nl.outputs.date }}
+          EPISODE_NEWSLETTER: ${{ steps.nl.outputs.newsletter }}
+          EPISODE_TITLE: ${{ github.event.inputs.title || 'Daily AI Brief' }}
+        run: |
+          PYTHONPATH=src python -m daily_ai_podcast.publish \
+            --date "${EPISODE_DATE}" \
+            --newsletter "${EPISODE_NEWSLETTER}" \
+            --title "${EPISODE_TITLE}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: episode-${{ steps.nl.outputs.date }}
+          path: |
+            output/${{ steps.nl.outputs.date }}-script.txt
+            output/${{ steps.nl.outputs.date }}-*.mp3
+            output/podcast.xml
+          if-no-files-found: warn
+          retention-days: 30
