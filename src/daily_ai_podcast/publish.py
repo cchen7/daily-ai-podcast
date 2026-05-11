@@ -6,7 +6,6 @@ import html
 import os
 import re
 import sys
-import textwrap
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -107,6 +106,41 @@ def strip_markdown(text: str) -> str:
     return text
 
 
+_NUM_TO_WORD = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven", 12: "twelve",
+}
+_STORY_NUMBER = re.compile(r"^(\d+)\.\s+(.*)$")
+
+
+def _conversational_h3(title: str) -> str:
+    """Turn '1. OpenAI's governance drama...' into 'Story one. OpenAI's governance drama...'"""
+    match = _STORY_NUMBER.match(title)
+    if match:
+        n = int(match.group(1))
+        rest = match.group(2)
+        ordinal = _NUM_TO_WORD.get(n, str(n))
+        return f"Story {ordinal}. {rest}."
+    return f"Next up. {title}."
+
+
+_H2_LEAD_INS = {
+    "top stories": None,  # implicit; H3s carry the structure
+    "signals to watch": "Now, a few signals to keep an eye on.",
+    "bottom line": "And the bottom line.",
+}
+
+
+def _why_matters_replacement(match: re.Match[str]) -> str:
+    first, second = match.group(1), match.group(2)
+    # If next char is also uppercase (acronym like "AI"), preserve case;
+    # otherwise lowercase the leading letter to read as a continuation.
+    if second.islower():
+        first = first.lower()
+    return f"So why does this matter? Well, {first}{second}"
+
+
 def newsletter_to_script(newsletter: str, episode_date: str, podcast_title: str) -> str:
     lines: list[str] = []
     skip_sources = False
@@ -125,39 +159,42 @@ def newsletter_to_script(newsletter: str, episode_date: str, podcast_title: str)
             continue
         if line.startswith("# "):
             continue
+        # Skip date/locale subtitle rows (e.g. "Friday, May 8, 2026 · Asia/Shanghai").
+        if " · " in line and not line.startswith(("##", "-", "*")):
+            continue
         if line.startswith("## "):
             heading = strip_markdown(line[3:]).strip()
-            if heading.lower() not in {"top stories", "signals to watch", "bottom line"}:
-                lines.append(f"{heading}.")
+            lead_in = _H2_LEAD_INS.get(heading.lower(), f"{heading}.")
+            if lead_in:
+                lines.append(lead_in)
             continue
         if line.startswith("### "):
             title = strip_markdown(line[4:]).strip()
-            lines.append(f"Next: {title}.")
+            lines.append(_conversational_h3(title))
             continue
 
         line = strip_markdown(line)
-        line = line.replace("Why it matters:", "Why it matters.")
+        line = re.sub(r"Why it matters:\s*([A-Za-z])([A-Za-z])", _why_matters_replacement, line)
         line = re.sub(r"\s+", " ", line).strip()
         if line:
             lines.append(line)
 
     date_obj = datetime.strptime(episode_date, "%Y-%m-%d").date()
     spoken_date = date_obj.strftime("%A, %B %-d, %Y") if sys.platform != "win32" else date_obj.strftime("%A, %B %#d, %Y")
-    body = "\n\n".join(lines)
-    return textwrap.dedent(
-        f"""
-        Welcome to {podcast_title}, your concise briefing on the AI news that matters. Today is {spoken_date}.
-
-        {body}
-
-        That's it for today's Daily AI Brief. The main signal: AI is moving beyond model launches into governance, infrastructure, workforce design, and legal accountability. Thanks for listening.
-        """
-    ).strip()
+    intro = (
+        f"Hey — welcome to {podcast_title}. "
+        f"I'm catching you up on the AI news that actually matters today. "
+        f"It's {spoken_date}."
+    )
+    outro = "That's it for today. Thanks for listening — see you tomorrow."
+    return "\n\n".join([intro, "\n\n".join(lines), outro])
 
 
 def script_to_ssml(script: str, config: PodcastConfig) -> str:
     paragraphs = [p.strip() for p in re.split(r"\n{2,}", script) if p.strip()]
-    body = "".join(f"<p>{html.escape(paragraph)}</p>" for paragraph in paragraphs)
+    body = '<break time="450ms"/>'.join(
+        f"<p>{html.escape(p)}</p>" for p in paragraphs
+    )
     return (
         f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
         f'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US">'

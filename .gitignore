@@ -16,6 +16,9 @@ __pycache__/
 # Local artifacts (publish.py output)
 output/
 
+# Ad-hoc experiment scripts (voice A/B etc.)
+scripts/
+
 # Editor / OS
 .DS_Store
 .idea/
